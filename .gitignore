@@ -1,0 +1,4 @@
+.vscode/
+*.dSYM.zip
+*.dSYM
+.DS_Store
