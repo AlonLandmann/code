@@ -16,22 +16,23 @@ typedef struct {
 
 // process the user input
 void process_input(int argc, char *argv[], int rank, size_info *size,
-    char *file_path, double *lambda, double *s)
+    char *training_path, char *test_path, double *lambda, double *s)
 {
   // report proper structure if arguments are missing
-  if (argc < 5) {
+  if (argc < 6) {
     if (rank == 0) {
-      fprintf(stderr, "Usage: %s <Number of Features> <File Name Prefix> <lambda> <s>\n", argv[0]);
+      fprintf(stderr, "Usage: %s <Training file prefix> <Test file prefix> <Number of features> <lambda> <s>\n", argv[0]);
     }
     MPI_Finalize();
     exit(EXIT_FAILURE);
   }
 
   // allocate the input parameters
-  size->f1 = atoi(argv[1]) + 1;
-  sprintf(file_path, "./data/%s_%d.dat", argv[2], rank);
-  *lambda = atof(argv[3]);
-  *s = atof(argv[4]);
+  sprintf(training_path, "./data/%s_%d.dat", argv[1], rank);
+  sprintf(test_path, "./data/%s_%d.dat", argv[2], rank);
+  size->f1 = atoi(argv[3]) + 1;
+  *lambda = atof(argv[4]);
+  *s = atof(argv[5]);
 }
 
 // read the file data
@@ -278,20 +279,22 @@ int main(int argc, char *argv[])
 {
   int nprocs, rank;
   size_info size;
-  char file_path[100];
-  double lambda, s, *local_data, *matrix, *labels, *alpha;
+  char training_path[100], test_path[100];
+  double lambda, s, *local_data, *matrix, *labels, *alpha, *test_data;
 
   MPI_Init(&argc, &argv);
   MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  process_input(argc, argv, rank, &size, file_path, &lambda, &s);
-  read_data(file_path, &size, &local_data);
+  process_input(argc, argv, rank, &size, training_path, test_path, &lambda, &s);
+  read_data(training_path, &size, &local_data);
   collect_size_info(nprocs, &size);
   compute_kernel_matrix(local_data, &size, nprocs, rank, s, &matrix);
   extract_labels(local_data, &size, &labels);
   add_ridge_parameter(lambda, &size, rank, &matrix);
   cg(matrix, labels, &size, rank, &alpha);
+  read_data(test_path, &size, &test_data);
 
+  
   // ...
   // double result;
   // inner_product(labels, labels, &size, &result);
