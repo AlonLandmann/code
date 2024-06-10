@@ -94,6 +94,55 @@ void collect_size_info(int nprocs, size_info *size)
   }
 }
 
+// standardize the data
+void standardize_data(double *data, size_info *size)
+{
+  int n_features, i, j;
+  double *local_sums,  *local_sumsq, *global_sums, *global_sumsq, *means, *stddevs;
+
+  // allocate memory and initialize to zeros
+  n_features = size->f1 - 1;
+  local_sums = (double *)calloc(n_features, sizeof(double));
+  local_sumsq = (double *)calloc(n_features, sizeof(double));
+  global_sums = (double *)calloc(n_features, sizeof(double));
+  global_sumsq = (double *)calloc(n_features, sizeof(double));
+  means = (double *)calloc(n_features, sizeof(double));
+  stddevs = (double *)calloc(n_features, sizeof(double));
+
+  // compute local sums and sum of squares
+  for (i = 0; i < size->n; i++) {
+    for (j = 0; j < n_features; j++) {
+      local_sums[j] += data[i * size->f1 + j];
+      local_sumsq[j] += data[i * size->f1 + j] * data[i * size->f1 + j];
+    }
+  }
+
+  // compute global sums and sum of squares
+  MPI_Allreduce(local_sums, global_sums, n_features, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(local_sumsq, global_sumsq, n_features, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+  // compute means and standard deviations
+  for (j = 0; j < n_features; j++) {
+    means[j] = global_sums[j] / size->total;
+    stddevs[j] = sqrt(global_sumsq[j] / size->total - means[j] * means[j]);
+  }
+
+  // standardize the data
+  for (i = 0; i < size->n; i++) {
+    for (j = 0; j < n_features; j++) {
+      data[i * size->f1 + j] = (data[i * size->f1 + j] - means[j]) / stddevs[j];
+    }
+  }
+
+  // free allocated memory
+  free(local_sums);
+  free(local_sumsq);
+  free(global_sums);
+  free(global_sumsq);
+  free(means);
+  free(stddevs);
+}
+
 // compute the rbf kernel of two feature vectors
 void compute_kernel(double *x1, double *x2, size_info *size, double s, double *result)
 {
@@ -352,11 +401,13 @@ int main(int argc, char *argv[])
   read_data(test_path, &test_size, &test_data);
   collect_size_info(nprocs, &train_size);
   collect_size_info(nprocs, &test_size);
+  standardize_data(train_data, &train_size);
+  standardize_data(test_data, &test_size);
 
   // train the model
   compute_kernel_matrix(train_data, &train_size, nprocs, rank, s, &matrix);
-  extract_labels(train_data, &train_size, &labels);
   add_ridge_parameter(lambda, &train_size, rank, &matrix);
+  extract_labels(train_data, &train_size, &labels);
   cg(matrix, labels, &train_size, rank, &alpha);
 
   // test the model
@@ -368,7 +419,6 @@ int main(int argc, char *argv[])
   return EXIT_SUCCESS;
 }
 
-// standardize test data
 // make rmse computation more efficient
 // clean up memory
 // consider alternate (more random) data split
