@@ -15,8 +15,8 @@ typedef struct {
 } size_info;
 
 // process the user input
-void process_input(int argc, char *argv[], int rank, size_info *size,
-    char *training_path, char *test_path, double *lambda, double *s)
+void process_input(int argc, char *argv[], int rank, size_info *size, size_info *size_test,
+    char *train_path, char *test_path, double *lambda, double *s)
 {
   // report proper structure if arguments are missing
   if (argc < 6) {
@@ -28,9 +28,9 @@ void process_input(int argc, char *argv[], int rank, size_info *size,
   }
 
   // allocate the input parameters
-  sprintf(training_path, "./data/%s_%d.dat", argv[1], rank);
+  sprintf(train_path, "./data/%s_%d.dat", argv[1], rank);
   sprintf(test_path, "./data/%s_%d.dat", argv[2], rank);
-  size->f1 = atoi(argv[3]) + 1;
+  size->f1 = size_test->f1 = atoi(argv[3]) + 1;
   *lambda = atof(argv[4]);
   *s = atof(argv[5]);
 }
@@ -97,9 +97,10 @@ void collect_size_info(int nprocs, size_info *size)
 void compute_kernel(double *x1, double *x2, size_info *size, double s, double *result)
 {
   int i;
+  double diff, distance_squared;
 
   // distance squared
-  double diff, distance_squared = 0.;
+  distance_squared = 0.;
   for (i = 0; i < size->f1 - 1; i++) {
     diff = x1[i] - x2[i];
     distance_squared += diff * diff;
@@ -274,27 +275,91 @@ void cg(double *A, double *y, size_info *size, int rank, double **alpha)
   }
 }
 
+// find root from global index
+void find_root(int nprocs, int index, size_info *size_test, int *root)
+{
+  int i;
+
+  // find the rank of the root
+  for (i = 0; i < nprocs; i++) {
+    if (size_test->offsets[i] <= index && index < size_test->offsets[i] + size_test->each[i]) {
+      *root = i;
+      break;
+    }
+  }
+}
+
+// compute the complete rmse
+void compute_rmse(double *train_data, size_info *size, double *test_data, size_info *size_test,
+    int nprocs, int rank, double s, double *alpha, double *rmse)
+{
+  int i, j, root;
+  double *x, local_part_f, kernel_value, f, diff, square_diff_sum;
+
+  // compute the local sum of square differences
+  square_diff_sum = 0.;
+  for (i = 0; i < size_test->total; i++) {
+    // broadcast test vector to all processes
+    find_root(nprocs, i, size_test, &root);
+    if (rank == root) {
+      x = &test_data[(i % size_test->offsets[rank]) * size_test->f1];
+      MPI_Bcast(x, size_test->f1, MPI_DOUBLE, root, MPI_COMM_WORLD);
+    } else {
+      MPI_Bcast(x, size_test->f1, MPI_DOUBLE, root, MPI_COMM_WORLD);
+    }
+
+    // compute local part
+    local_part_f = 0.;
+    for (j = 0; j < size->n; j++) {
+      compute_kernel(x, &train_data[j * size->f1], size, s, &kernel_value);
+      local_part_f += alpha[j] * kernel_value;
+    }
+
+    // compute prediction
+    MPI_Reduce(&local_part_f, &f, 1, MPI_DOUBLE, MPI_SUM, root, MPI_COMM_WORLD);
+
+    // compute squared difference
+    if (rank == root) {
+      diff = x[size_test->f1 - 1] - f;
+      square_diff_sum += diff * diff;
+    }
+  }
+
+  // compute the rmse
+  MPI_Reduce(&square_diff_sum, rmse, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+  if (rank == 0) {
+    *rmse = sqrt(*rmse / size_test->total);
+  }
+}
+
 // main function
 int main(int argc, char *argv[])
 {
   int nprocs, rank;
-  size_info size;
-  char training_path[100], test_path[100];
-  double lambda, s, *local_data, *matrix, *labels, *alpha, *test_data;
+  size_info size, size_test;
+  char train_path[100], test_path[100];
+  double lambda, s, *local_data, *matrix, *labels, *alpha, *test_data, rmse_train, rmse_test;
 
   MPI_Init(&argc, &argv);
   MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  process_input(argc, argv, rank, &size, training_path, test_path, &lambda, &s);
-  read_data(training_path, &size, &local_data);
+  process_input(argc, argv, rank, &size, &size_test, train_path, test_path, &lambda, &s);
+  read_data(train_path, &size, &local_data);
+  read_data(test_path, &size_test, &test_data);
   collect_size_info(nprocs, &size);
+  collect_size_info(nprocs, &size_test);
   compute_kernel_matrix(local_data, &size, nprocs, rank, s, &matrix);
   extract_labels(local_data, &size, &labels);
   add_ridge_parameter(lambda, &size, rank, &matrix);
   cg(matrix, labels, &size, rank, &alpha);
-  read_data(test_path, &size, &test_data);
+  compute_rmse(local_data, &size, local_data, &size, nprocs, rank, s, alpha, &rmse_train);
+  compute_rmse(local_data, &size, test_data, &size_test, nprocs, rank, s, alpha, &rmse_test);
 
-  
+  if (rank == 0) {
+    printf("Train data RMSE: %lf\n", rmse_train);
+    printf("Test data RMSE: %lf\n", rmse_test);
+  }
+
   // ...
   // double result;
   // inner_product(labels, labels, &size, &result);
@@ -333,7 +398,7 @@ int main(int argc, char *argv[])
   // ...
 
 
-  // XXX CLEAN UP
+  // XXX CLEAN UP ALL POSSIBLE ARRAYS
   MPI_Finalize();
 
   return EXIT_SUCCESS;
