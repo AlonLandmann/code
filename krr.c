@@ -431,8 +431,3 @@ int main(int argc, char *argv[])
   // exit
   return EXIT_SUCCESS;
 }
-
-// consider alternate (more random) data split
-// consider asking about the missing data points in his presentation
-// test some hyperparameters
-// write algo to find optimal hyper parameter
