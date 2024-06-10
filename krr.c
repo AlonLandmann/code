@@ -134,7 +134,7 @@ void standardize_data(double *data, size_info *size)
     }
   }
 
-  // free allocated memory
+  // free memory
   free(local_sums);
   free(local_sumsq);
   free(global_sums);
@@ -249,7 +249,7 @@ void mv_prod(double *matrix, double *vector, size_info *size, double **result)
     }
   }
 
-  // free the assembled memory
+  // free memory
   free(complete_vector);
 }
 
@@ -323,6 +323,12 @@ void cg(double *A, double *y, size_info *size, int rank, double **alpha)
       printf("Iter %d: Residual = %lf\n", iter, E);
     }
   }
+
+  // free memory
+  free(A_alpha);
+  free(r);
+  free(p);
+  free(A_p);
 }
 
 // find root from global index
@@ -414,13 +420,18 @@ int main(int argc, char *argv[])
   compute_rmse(train_data, &train_size, train_data, &train_size, nprocs, rank, s, alpha, "Train");
   compute_rmse(train_data, &train_size, test_data, &test_size, nprocs, rank, s, alpha, "Test");
 
-  // finalize and exit
+  // clean up
+  free(train_data);
+  free(test_data);
+  free(matrix);
+  free(labels);
+  free(alpha);
   MPI_Finalize();
+
+  // exit
   return EXIT_SUCCESS;
 }
 
-// make rmse computation more efficient
-// clean up memory
 // consider alternate (more random) data split
 // consider asking about the missing data points in his presentation
 // test some hyperparameters
