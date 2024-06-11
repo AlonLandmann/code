@@ -181,6 +181,18 @@ void standardize_data(double *data, size_info *size)
   free(stddevs);
 }
 
+// extract labels from data
+void extract_labels(double *local_data, size_info *size, double **labels)
+{
+  int i;
+
+  // extract labels
+  *labels = (double *)malloc(size->n * sizeof(double));
+  for (i = 0; i < size->n; i++) {
+    (*labels)[i] = local_data[i * size->f1 + (size->f1 - 1)];
+  }
+}
+
 // compute the rbf kernel of two feature vectors
 void compute_kernel(double *x1, double *x2, size_info *size, double s, double *result)
 {
@@ -224,10 +236,7 @@ void compute_kernel_matrix(double *local_data, size_info *size, int nprocs,
   double *foreign_data;
   MPI_Request req[2];
 
-  // allocate memory for the local part of the kernel matrix
-  *matrix = (double *)malloc(size->n * size->total * sizeof(double));
-
-  // compute the diagonal blocks locally
+  // compute the diagonal blocks locally (matrix memory is pre-allocated)
   compute_kernel_block(local_data, size, local_data, size->n, size->offsets[rank], s, matrix);
 
   // compute the other blocks of the matrix one by one
@@ -244,18 +253,6 @@ void compute_kernel_matrix(double *local_data, size_info *size, int nprocs,
   }
 }
 
-// extract labels from data
-void extract_labels(double *local_data, size_info *size, double **labels)
-{
-  int i;
-
-  // extract labels
-  *labels = (double *)malloc(size->n * sizeof(double));
-  for (i = 0; i < size->n; i++) {
-    (*labels)[i] = local_data[i * size->f1 + (size->f1 - 1)];
-  }
-}
-
 // add ridge parameter to the diagonal of the kernel matrix
 void add_ridge_parameter(double lambda, size_info *size, int rank, double **matrix)
 {
@@ -268,7 +265,7 @@ void add_ridge_parameter(double lambda, size_info *size, int rank, double **matr
 }
 
 // distributed matrix-vector multiplication
-void mv_prod(double *matrix, double *vector, size_info *size, double **result)
+void mv_product(double *matrix, double *vector, size_info *size, double **result)
 {
   int i, j;
   double *complete_vector;
@@ -313,14 +310,13 @@ void cg(double *A, double *y, size_info *size, int rank, double **alpha, result 
   int i;
   double *A_alpha, *r, *p, r_r, E, *A_p, p_A_p, q, new_r_r, beta;
 
-  // construct the initial guess
-  *alpha = (double *)malloc(size->n * sizeof(double));
+  // construct the initial guess (alpha memory is pre-allocated)
   for (i = 0; i < size->n; i++) {
     (*alpha)[i] = 0.;
   }
 
   // compute the initial residual
-  mv_prod(A, *alpha, size, &A_alpha);
+  mv_product(A, *alpha, size, &A_alpha);
   r = (double *)malloc(size->n * sizeof(double));
   for (i = 0; i < size->n; i++) {
     r[i] = y[i] - A_alpha[i];
@@ -342,7 +338,7 @@ void cg(double *A, double *y, size_info *size, int rank, double **alpha, result 
 
   // execute the iterative scheme
   while (E > THRESH) {
-    mv_prod(A, p, size, &A_p);
+    mv_product(A, p, size, &A_p);
     inner_product(p, A_p, size, &p_A_p);
     q = r_r / p_A_p;
     for (i = 0; i < size->n; i++) {
@@ -456,8 +452,12 @@ int main(int argc, char *argv[])
   standardize_data(test_data, &test_size);
   extract_labels(train_data, &train_size, &labels);
 
-  // obtain results
+  // allocate memory
   results = (result *)malloc(lambda_size * s_size * sizeof(result));
+  matrix = (double *)malloc(train_size.n * train_size.total * sizeof(double));
+  alpha = (double *)malloc(train_size.n * sizeof(double));
+
+  // obtain results
   for (i = 0; i < lambda_size; i++) {
     for (j = 0; j < s_size; j++) {
       // current result
@@ -493,17 +493,17 @@ int main(int argc, char *argv[])
     }
   }
   
-  // clean up
+  // free memory
   free(train_data);
   free(test_data);
   free(labels);
-  free(matrix);
-  free(alpha);
   free(lambda);
   free(s);
+  free(matrix);
+  free(alpha);
   free(results);
-  MPI_Finalize();
 
-  // exit
+  // finalize and exit
+  MPI_Finalize();
   return EXIT_SUCCESS;
 }
