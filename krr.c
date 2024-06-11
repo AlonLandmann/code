@@ -365,58 +365,53 @@ void cg(double *A, double *y, size_info *size, int rank, double **alpha, result 
   free(A_p);
 }
 
-// find root from global index
-void find_root(int nprocs, int index, size_info *test_size, int *root)
-{
-  int i;
-
-  // find the rank of the root
-  for (i = 0; i < nprocs; i++) {
-    if (test_size->offsets[i] <= index && index < test_size->offsets[i] + test_size->each[i]) {
-      *root = i;
-      break;
-    }
-  }
-}
-
-// compute the complete rmse
+// compute root mean squared error
 void compute_rmse(double *train_data, size_info *train_size, double *test_data, size_info *test_size,
     int nprocs, int rank, double s, double *alpha, result *current_result, char train_or_test)
 {
-  int i, j, root;
-  double *x, local_part_f, kernel_value, f, diff, square_diff_sum;
+  int i, j, k, m;
+  double *foreign_data, kernel_value, *f_parts, *f_totals, *labels, diff, square_diff_sum;
 
-  // compute the local sum of square differences
-  square_diff_sum = 0.;
-  for (i = 0; i < test_size->total; i++) {
-    // broadcast test vector to all processes
-    find_root(nprocs, i, test_size, &root);
-    if (rank == root) {
-      x = &test_data[(i - test_size->offsets[rank]) * test_size->f1];
-      MPI_Bcast(x, test_size->f1, MPI_DOUBLE, root, MPI_COMM_WORLD);
+  for (i = 0; i < nprocs; i++) {
+    // broadcast the m test samples located in process i
+    m = test_size->each[i];
+    foreign_data = (double *)malloc(m * test_size->f1 * sizeof(double));
+    if (rank == i) {
+      MPI_Bcast(test_data, m * test_size->f1, MPI_DOUBLE, i, MPI_COMM_WORLD);
+      memcpy(foreign_data, test_data, m * test_size->f1 * sizeof(double));
     } else {
-      x = malloc(test_size->f1 * sizeof(double));
-      MPI_Bcast(x, test_size->f1, MPI_DOUBLE, root, MPI_COMM_WORLD);
+      MPI_Bcast(foreign_data, m * test_size->f1, MPI_DOUBLE, i, MPI_COMM_WORLD);
     }
 
-    // compute local part
-    local_part_f = 0.;
-    for (j = 0; j < train_size->n; j++) {
-      compute_kernel(x, &train_data[j * train_size->f1], train_size, s, &kernel_value);
-      local_part_f += alpha[j] * kernel_value;
+    // compute local parts of the prediction values
+    f_parts = (double *)calloc(m, sizeof(double));
+    for (j = 0; j < m; j++) {
+      for (k = 0; k < train_size->n; k++) {
+        compute_kernel(&foreign_data[j * test_size->f1], &train_data[k * train_size->f1], train_size, s, &kernel_value);
+        f_parts[j] += alpha[k] * kernel_value;
+      }
     }
+    free(foreign_data);
 
-    // compute prediction
-    MPI_Reduce(&local_part_f, &f, 1, MPI_DOUBLE, MPI_SUM, root, MPI_COMM_WORLD);
+    // compute the total prediction values in the root process
+    f_totals = (double *)malloc(m * sizeof(double));
+    MPI_Reduce(f_parts, f_totals, m, MPI_DOUBLE, MPI_SUM, i, MPI_COMM_WORLD);
+    free(f_parts);
 
-    // compute squared difference
-    if (rank == root) {
-      diff = x[test_size->f1 - 1] - f;
-      square_diff_sum += diff * diff;
+    // compute square diff sum in the root process
+    if (rank == i) {
+      extract_labels(test_data, test_size, &labels);
+      square_diff_sum = 0.;
+      for (j = 0; j < m; j++) {
+        diff = labels[j] - f_totals[j];
+        square_diff_sum += diff * diff;
+      }
+      free(labels);
     }
+    free(f_totals);
   }
 
-  // compute the rmse
+  // compute rmse
   if (train_or_test == 'a') {
     MPI_Reduce(&square_diff_sum, &current_result->train_rmse, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     if (rank == 0) {
@@ -482,9 +477,9 @@ int main(int argc, char *argv[])
     }
   }
 
-  // present results together
+  // print final results
   if (rank == 0) {
-    printf("== FINAL RESULTS ==\n");
+    printf("\n== FINAL RESULTS ==\n");
     for (i = 0; i < lambda_size; i++) {
       for (j = 0; j < s_size; j++) {
         printf("lambda = %lf\ts = %lf\tn_iter = %d\ttrain_rmse = %lf\ttest_rmse = %lf\n",
