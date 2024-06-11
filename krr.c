@@ -14,14 +14,52 @@ typedef struct {
   int *offsets;  // number of samples up to each process
 } size_info;
 
+typedef struct {
+  double lambda;
+  double s;
+  int n_iter;
+  double train_rmse;
+  double test_rmse;
+} result;
+
+// process csv strings
+void parse_csv_to_array(char *input, double **array, int *size)
+{
+  int count, index;
+  char *temp, *input_copy, *token;
+
+  // count the number of commas to determine the number of elements
+  temp = input;
+  count = 1;
+  while (*temp) {
+    if (*temp == ',') {
+      count++;
+    }
+    temp++;
+  }
+  *size = count;
+
+  // parse the input string into the array
+  *array = (double *)malloc(count * sizeof(double));
+  input_copy = strdup(input);
+  token = strtok(input_copy, ",");
+  index = 0;
+  while (token != NULL) {
+    (*array)[index++] = atof(token);
+    token = strtok(NULL, ",");
+  }
+  free(input_copy);
+}
+
 // process the user input
 void process_input(int argc, char *argv[], int rank, char *train_path, char *test_path,
-    size_info *train_size, size_info *test_size, double *lambda, double *s)
+    size_info *train_size, size_info *test_size, double **lambda, int *lambda_size, double **s, int *s_size)
 {
   // report proper structure if arguments are missing
   if (argc < 6) {
     if (rank == 0) {
-      fprintf(stderr, "Usage: %s <Train file prefix> <Test file prefix> <Number of features> <lambda> <s>\n", argv[0]);
+      fprintf(stderr, "Usage: %s <Train file prefix> <Test file prefix> <Number of features> <lambda values> <s values>.\n", argv[0]);
+      fprintf(stderr, "\t\t<lambda values> and <s values> should be comma-separated lists of doubles.\n");
     }
     MPI_Finalize();
     exit(EXIT_FAILURE);
@@ -31,8 +69,8 @@ void process_input(int argc, char *argv[], int rank, char *train_path, char *tes
   sprintf(train_path, "./data/%s_%d.dat", argv[1], rank);
   sprintf(test_path, "./data/%s_%d.dat", argv[2], rank);
   train_size->f1 = test_size->f1 = atoi(argv[3]) + 1;
-  *lambda = atof(argv[4]);
-  *s = atof(argv[5]);
+  parse_csv_to_array(argv[4], lambda, lambda_size);
+  parse_csv_to_array(argv[5], s, s_size);
 }
 
 // read the file data
@@ -270,9 +308,9 @@ void inner_product(double *x1, double *x2, size_info *size, double *result)
 }
 
 // conjugate gradient algorithm
-void cg(double *A, double *y, size_info *size, int rank, double **alpha)
+void cg(double *A, double *y, size_info *size, int rank, double **alpha, result *current_result)
 {
-  int i, iter;
+  int i;
   double *A_alpha, *r, *p, r_r, E, *A_p, p_A_p, q, new_r_r, beta;
 
   // construct the initial guess
@@ -297,9 +335,9 @@ void cg(double *A, double *y, size_info *size, int rank, double **alpha)
   // compute the initial norm and norm squared of the residual
   inner_product(r, r, size, &r_r);
   E = sqrt(r_r);
-  iter = 0;
+  current_result->n_iter = 0;
   if (rank == 0) {
-    printf("Iter %d: Residual = %lf\n", iter, E);
+    printf("Iter 0: Residual = %lf\n", E);
   }
 
   // execute the iterative scheme
@@ -318,9 +356,9 @@ void cg(double *A, double *y, size_info *size, int rank, double **alpha)
       p[i] = r[i] + beta * p[i];
     }
     r_r = new_r_r;
-    iter++;
+    (current_result->n_iter)++;
     if (rank == 0) {
-      printf("Iter %d: Residual = %lf\n", iter, E);
+      printf("Iter %d: Residual = %lf\n", current_result->n_iter, E);
     }
   }
 
@@ -347,10 +385,10 @@ void find_root(int nprocs, int index, size_info *test_size, int *root)
 
 // compute the complete rmse
 void compute_rmse(double *train_data, size_info *train_size, double *test_data, size_info *test_size,
-    int nprocs, int rank, double s, double *alpha, char *print_prefix)
+    int nprocs, int rank, double s, double *alpha, result *current_result, char train_or_test)
 {
   int i, j, root;
-  double *x, local_part_f, kernel_value, f, diff, square_diff_sum, rmse;
+  double *x, local_part_f, kernel_value, f, diff, square_diff_sum;
 
   // compute the local sum of square differences
   square_diff_sum = 0.;
@@ -383,49 +421,87 @@ void compute_rmse(double *train_data, size_info *train_size, double *test_data, 
   }
 
   // compute the rmse
-  MPI_Reduce(&square_diff_sum, &rmse, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-  if (rank == 0) {
-    rmse = sqrt(rmse / test_size->total);
-    printf("%s data RMSE: %lf\n", print_prefix, rmse);
+  if (train_or_test == 'a') {
+    MPI_Reduce(&square_diff_sum, &current_result->train_rmse, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    if (rank == 0) {
+      current_result->train_rmse = sqrt(current_result->train_rmse / test_size->total);
+    }
+  } else if (train_or_test == 'b') {
+    MPI_Reduce(&square_diff_sum, &current_result->test_rmse, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    if (rank == 0) {
+      current_result->test_rmse = sqrt(current_result->test_rmse / test_size->total);
+    }
   }
 }
 
 // main function
 int main(int argc, char *argv[])
 {
-  int nprocs, rank;
+  int nprocs, rank, lambda_size, s_size, i, j;
   char train_path[100], test_path[100];
   size_info train_size, test_size;
-  double lambda, s, *train_data, *test_data, *matrix, *labels, *alpha;
+  double *lambda, *s, *train_data, *test_data, *labels, *matrix, *alpha;
+  result *results, *current_result;
 
   // process input and collect size info
   MPI_Init(&argc, &argv);
   MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  process_input(argc, argv, rank, train_path, test_path, &train_size, &test_size, &lambda, &s);
+  process_input(argc, argv, rank, train_path, test_path, &train_size, &test_size, &lambda, &lambda_size, &s, &s_size);
   read_data(train_path, &train_size, &train_data);
   read_data(test_path, &test_size, &test_data);
   collect_size_info(nprocs, &train_size);
   collect_size_info(nprocs, &test_size);
   standardize_data(train_data, &train_size);
   standardize_data(test_data, &test_size);
-
-  // train the model
-  compute_kernel_matrix(train_data, &train_size, nprocs, rank, s, &matrix);
-  add_ridge_parameter(lambda, &train_size, rank, &matrix);
   extract_labels(train_data, &train_size, &labels);
-  cg(matrix, labels, &train_size, rank, &alpha);
 
-  // test the model
-  compute_rmse(train_data, &train_size, train_data, &train_size, nprocs, rank, s, alpha, "Train");
-  compute_rmse(train_data, &train_size, test_data, &test_size, nprocs, rank, s, alpha, "Test");
+  // obtain results
+  results = (result *)malloc(lambda_size * s_size * sizeof(result));
+  for (i = 0; i < lambda_size; i++) {
+    for (j = 0; j < s_size; j++) {
+      // current result
+      current_result = &results[i * lambda_size + j];
+      current_result->lambda = lambda[i];
+      current_result->s = s[j];
 
+      // train the model
+      compute_kernel_matrix(train_data, &train_size, nprocs, rank, s[j], &matrix);
+      add_ridge_parameter(lambda[i], &train_size, rank, &matrix);
+      cg(matrix, labels, &train_size, rank, &alpha, current_result);
+      
+      // test the model
+      compute_rmse(train_data, &train_size, train_data, &train_size, nprocs, rank, s[j], alpha, current_result, 'a');
+      compute_rmse(train_data, &train_size, test_data, &test_size, nprocs, rank, s[j], alpha, current_result, 'b');
+
+      // print result during computations
+      if (rank == 0) {
+        printf("lambda = %lf\ts = %lf\tn_iter = %d\ttrain_rmse = %lf\ttest_rmse = %lf\n",
+            lambda[i], s[j], current_result->n_iter, current_result->train_rmse, current_result->test_rmse);
+      }
+    }
+  }
+
+  // present results together
+  if (rank == 0) {
+    printf("== FINAL RESULTS ==\n");
+    for (i = 0; i < lambda_size; i++) {
+      for (j = 0; j < s_size; j++) {
+        printf("lambda = %lf\ts = %lf\tn_iter = %d\ttrain_rmse = %lf\ttest_rmse = %lf\n",
+            lambda[i], s[j], results[i * lambda_size + j].n_iter, results[i * lambda_size + j].train_rmse, results[i * lambda_size + j].test_rmse);
+      }
+    }
+  }
+  
   // clean up
   free(train_data);
   free(test_data);
-  free(matrix);
   free(labels);
+  free(matrix);
   free(alpha);
+  free(lambda);
+  free(s);
+  free(results);
   MPI_Finalize();
 
   // exit
