@@ -194,7 +194,7 @@ void extract_labels(double *local_data, size_info *size, double **labels)
 }
 
 // compute the rbf kernel of two feature vectors
-void compute_kernel(double *x1, double *x2, size_info *size, double s, double *result)
+double compute_kernel(double *x1, double *x2, size_info *size, double s)
 {
   int i;
   double diff, distance_squared;
@@ -207,7 +207,7 @@ void compute_kernel(double *x1, double *x2, size_info *size, double s, double *r
   }
 
   // radial basis function
-  *result = exp(-distance_squared / (2 * s * s));
+  return exp(-distance_squared / (2 * s * s));
 }
 
 // compute the a block of the kernel matrix
@@ -223,7 +223,7 @@ void compute_kernel_block(double *local_data, size_info *size,
       index = i * size->total + foreign_offset + j;
       x1 = &local_data[i * size->f1];
       x2 = &foreign_data[j * size->f1];
-      compute_kernel(x1, x2, size, s, &(*matrix)[index]);
+      (*matrix)[index] = compute_kernel(x1, x2, size, s);
     }
   }
 }
@@ -289,10 +289,10 @@ void mv_product(double *matrix, double *vector, size_info *size, double **result
 }
 
 // distributed inner product computation
-void inner_product(double *x1, double *x2, size_info *size, double *result)
+double inner_product(double *x1, double *x2, size_info *size)
 {
   int i;
-  double local_part;
+  double local_part, result;
 
   // compute the local part
   local_part = 0.;
@@ -301,14 +301,15 @@ void inner_product(double *x1, double *x2, size_info *size, double *result)
   }
 
   // sum the parts together
-  MPI_Allreduce(&local_part, result, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&local_part, &result, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  return result;
 }
 
 // conjugate gradient algorithm
 void cg(double *A, double *y, size_info *size, int rank, double **alpha, result *current_result)
 {
   int i;
-  double *A_alpha, *r, *p, r_r, E, *A_p, p_A_p, q, new_r_r, beta;
+  double *A_alpha, *r, *p, r_r, E, *A_p, q, new_r_r, beta;
 
   // construct the initial guess (alpha memory is pre-allocated)
   for (i = 0; i < size->n; i++) {
@@ -329,7 +330,7 @@ void cg(double *A, double *y, size_info *size, int rank, double **alpha, result 
   }
 
   // compute the initial norm and norm squared of the residual
-  inner_product(r, r, size, &r_r);
+  r_r = inner_product(r, r, size);
   E = sqrt(r_r);
   current_result->n_iter = 0;
   if (rank == 0) {
@@ -339,13 +340,12 @@ void cg(double *A, double *y, size_info *size, int rank, double **alpha, result 
   // execute the iterative scheme
   while (E > THRESH) {
     mv_product(A, p, size, &A_p);
-    inner_product(p, A_p, size, &p_A_p);
-    q = r_r / p_A_p;
+    q = r_r / inner_product(p, A_p, size);
     for (i = 0; i < size->n; i++) {
       (*alpha)[i] += q * p[i];
       r[i] -= q * A_p[i];
     }
-    inner_product(r, r, size, &new_r_r);
+    new_r_r = inner_product(r, r, size);
     E = sqrt(new_r_r);
     beta = new_r_r / r_r;
     for (i = 0; i < size->n; i++) {
@@ -370,7 +370,7 @@ void compute_rmse(double *train_data, size_info *train_size, double *test_data, 
     int nprocs, int rank, double s, double *alpha, result *current_result, char train_or_test)
 {
   int i, j, k, m;
-  double *foreign_data, kernel_value, *f_parts, *f_totals, *labels, diff, square_diff_sum;
+  double *foreign_data, *f_parts, *f_totals, *labels, diff, square_diff_sum;
 
   for (i = 0; i < nprocs; i++) {
     // broadcast the m test samples located in process i
@@ -387,8 +387,7 @@ void compute_rmse(double *train_data, size_info *train_size, double *test_data, 
     f_parts = (double *)calloc(m, sizeof(double));
     for (j = 0; j < m; j++) {
       for (k = 0; k < train_size->n; k++) {
-        compute_kernel(&foreign_data[j * test_size->f1], &train_data[k * train_size->f1], train_size, s, &kernel_value);
-        f_parts[j] += alpha[k] * kernel_value;
+        f_parts[j] += alpha[k] * compute_kernel(&foreign_data[j * test_size->f1], &train_data[k * train_size->f1], train_size, s);
       }
     }
     free(foreign_data);
