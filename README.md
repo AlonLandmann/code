@@ -1,7 +1,7 @@
 ## General
-The code in the `krr.c` file was used to perform a kernel ridge regression on the data located in `data/cal_housing.dat`.
+The code in the `krr.c` file can be used to perform a kernel ridge regression on the data located in `data/cal_housing.dat`.
 The bash script `split_data.sh` was used to split the data randomly into 70% for training and 30% for testing, and to further split the data evenly into 6 pieces each for parallel processing.
-MPICH is imported to allow for parallel computing.
+mpich is used for parallel computing.
 
 ## Usage
 To recompile run
